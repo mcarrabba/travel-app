@@ -53,7 +53,7 @@ def init_db():
         )
     """)
 
-  # Create Appointments Table with travel expense & type fields
+  # Create Appointments Table
   cursor.execute("""
         CREATE TABLE IF NOT EXISTS appointments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -222,21 +222,32 @@ def get_destination_weather(city, target_date):
 # --- 5. OVERLAP & BUFFER LOGIC ---
 
 
-def check_buffer_overlap(username, new_date, new_buf_start, new_buf_end):
+def check_buffer_overlap(
+    username, new_date, new_buf_start, new_buf_end, exclude_id=None
+):
   conn = sqlite3.connect(DB_NAME)
   cursor = conn.cursor()
-  cursor.execute(
-      "SELECT title, buffer_start, buffer_end FROM appointments WHERE username"
-      " = ? AND date = ?",
-      (username, new_date),
-  )
+
+  if exclude_id:
+    cursor.execute(
+        "SELECT id, title, buffer_start, buffer_end FROM appointments WHERE"
+        " username = ? AND date = ? AND id != ?",
+        (username, new_date, exclude_id),
+    )
+  else:
+    cursor.execute(
+        "SELECT id, title, buffer_start, buffer_end FROM appointments WHERE"
+        " username = ? AND date = ?",
+        (username, new_date),
+    )
+
   existing = cursor.fetchall()
   conn.close()
 
   new_start_dt = datetime.strptime(f"{new_date} {new_buf_start}", "%Y-%m-%d %H:%M")
   new_end_dt = datetime.strptime(f"{new_date} {new_buf_end}", "%Y-%m-%d %H:%M")
 
-  for title, ext_start, ext_end in existing:
+  for ext_id, title, ext_start, ext_end in existing:
     ext_start_dt = datetime.strptime(
         f"{new_date} {ext_start}", "%Y-%m-%d %H:%M"
     )
@@ -426,8 +437,8 @@ else:
 
   st.write(
       f"Welcome back, **{current_user}**! Streamline your travel with"
-      " automated **30-minute buffer blackouts**, transit expense tracking,"
-      " and profit calculations."
+      " automated **30-minute buffer blackouts**, edit controls, and profit"
+      " calculations."
   )
 
   tab1, tab2, tab3, tab4 = st.tabs([
@@ -444,7 +455,7 @@ else:
       st.subheader("Your Travel Itinerary")
     with top_col2:
       if "show_form" not in st.session_state:
-        st.session_state.show_form = True
+        st.session_state.show_form = False
 
       if st.button("➕ New Appointment", use_container_width=True):
         st.session_state.show_form = not st.session_state.show_form
@@ -583,7 +594,6 @@ else:
           " get started!"
       )
     else:
-      # Combine all expenses for total cost calculation
       df["total_expenses"] = (
           df["expenses"].fillna(0)
           + df["parking_expense"].fillna(0)
@@ -593,6 +603,7 @@ else:
 
       st.dataframe(df, use_container_width=True)
 
+      # --- EXPORT & MANAGEMENT CONTROLS ---
       col_act1, col_act2 = st.columns([1, 1])
       with col_act1:
         ics_data = generate_ics_file(current_user)
@@ -604,9 +615,9 @@ else:
         )
 
       with col_act2:
-        st.markdown("### Manage Records")
+        st.markdown("### Manage / Delete Records")
         delete_id = st.number_input(
-            "Enter Appointment ID to Delete", min_value=0, step=1
+            "Enter ID to Delete", min_value=0, step=1, key="del_input"
         )
         if st.button("Delete Appointment"):
           conn = sqlite3.connect(DB_NAME)
@@ -619,6 +630,190 @@ else:
           conn.close()
           st.success(f"Deleted appointment ID {delete_id}")
           st.rerun()
+
+      st.divider()
+
+      # --- EDIT APPOINTMENT SECTION ---
+      st.markdown("### ✏️ Edit Existing Appointment")
+      edit_id = st.number_input(
+          "Enter Appointment ID to Edit", min_value=0, step=1, key="edit_input"
+      )
+
+      if edit_id > 0:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT title, city, phone_number, hotel_name, hotel_location,"
+            " price, expenses, parking_expense, travel_expense, travel_type,"
+            " notes, date, start_time, end_time FROM appointments WHERE id = ?"
+            " AND username = ?",
+            (edit_id, current_user),
+        )
+        record = cursor.fetchone()
+        conn.close()
+
+        if record:
+          (
+              r_title,
+              r_city,
+              r_phone,
+              r_hotel,
+              r_hloc,
+              r_price,
+              r_exp,
+              r_park,
+              r_texp,
+              r_ttype,
+              r_notes,
+              r_date,
+              r_start,
+              r_end,
+          ) = record
+
+          with st.form("edit_appointment_form"):
+            st.write(f"Editing Appointment ID: **{edit_id}**")
+            e_col1, e_col2 = st.columns(2)
+            with e_col1:
+              new_title = st.text_input("Appointment Title", value=r_title)
+              new_city = st.text_input("City", value=r_city)
+              new_phone = st.text_input(
+                  "Phone Number", value=r_phone if r_phone else ""
+              )
+              new_hotel = st.text_input(
+                  "Hotel Name", value=r_hotel if r_hotel else ""
+              )
+              new_hloc = st.text_input(
+                  "Hotel Address / Location", value=r_hloc if r_hloc else ""
+              )
+            with e_col2:
+              new_price = st.number_input(
+                  "Price / Revenue ($)",
+                  min_value=0.0,
+                  value=float(r_price or 0.0),
+                  step=10.0,
+              )
+              new_exp = st.number_input(
+                  "General Expenses ($)",
+                  min_value=0.0,
+                  value=float(r_exp or 0.0),
+                  step=10.0,
+              )
+              new_park = st.number_input(
+                  "Parking Expense ($)",
+                  min_value=0.0,
+                  value=float(r_park or 0.0),
+                  step=5.0,
+              )
+              travel_types_list = ["Car", "Train", "Flight"]
+              default_t_idx = (
+                  travel_types_list.index(r_ttype)
+                  if r_ttype in travel_types_list
+                  else 0
+              )
+              new_ttype = st.selectbox(
+                  "Travel / Transit Type",
+                  travel_types_list,
+                  index=default_t_idx,
+              )
+              new_texp = st.number_input(
+                  "Travel Expense Cost ($)",
+                  min_value=0.0,
+                  value=float(r_texp or 0.0),
+                  step=10.0,
+              )
+              parsed_date = datetime.strptime(r_date, "%Y-%m-%d").date()
+              new_date = st.date_input("Date", value=parsed_date)
+
+            e_time1, e_time2 = st.columns(2)
+            with e_time1:
+              parsed_start = datetime.strptime(r_start, "%H:%M").time()
+              new_start_time = st.time_input(
+                  "Start Time", value=parsed_start
+              )
+            with e_time2:
+              parsed_end = datetime.strptime(r_end, "%H:%M").time()
+              new_end_time = st.time_input("End Time", value=parsed_end)
+
+            new_notes = st.text_area(
+                "Notes / Remarks", value=r_notes if r_notes else ""
+            )
+
+            update_submitted = st.form_submit_button("Update Appointment")
+
+            if update_submitted:
+              ndate_str = new_date.strftime("%Y-%m-%d")
+              nstart_str = new_start_time.strftime("%H:%M")
+              nend_str = new_end_time.strftime("%H:%M")
+
+              nstart_dt = datetime.strptime(
+                  f"{ndate_str} {nstart_str}", "%Y-%m-%d %H:%M"
+              )
+              nend_dt = datetime.strptime(
+                  f"{ndate_str} {nend_str}", "%Y-%m-%d %H:%M"
+              )
+
+              if nstart_dt >= nend_dt:
+                st.error("Error: End time must be later than start time.")
+              else:
+                nbuf_start_dt = nstart_dt - timedelta(minutes=30)
+                nbuf_end_dt = nend_dt + timedelta(minutes=30)
+
+                nbuf_start_str = nbuf_start_dt.strftime("%H:%M")
+                nbuf_end_str = nbuf_end_dt.strftime("%H:%M")
+
+                has_overlap, conflicting_title = check_buffer_overlap(
+                    current_user,
+                    ndate_str,
+                    nbuf_start_str,
+                    nbuf_end_str,
+                    exclude_id=edit_id,
+                )
+
+                if has_overlap:
+                  st.error(
+                      f"❌ Conflict! This overlaps with the 30-minute buffer of"
+                      f" '{conflicting_title}'."
+                  )
+                else:
+                  conn = sqlite3.connect(DB_NAME)
+                  cursor = conn.cursor()
+                  cursor.execute(
+                      """
+                                            UPDATE appointments 
+                                            SET title = ?, city = ?, phone_number = ?, hotel_name = ?, hotel_location = ?, price = ?, expenses = ?, parking_expense = ?, travel_expense = ?, travel_type = ?, notes = ?, date = ?, start_time = ?, end_time = ?, buffer_start = ?, buffer_end = ?
+                                            WHERE id = ? AND username = ?
+                                        """,
+                      (
+                          new_title,
+                          new_city,
+                          new_phone,
+                          new_hotel,
+                          new_hloc,
+                          new_price,
+                          new_exp,
+                          new_park,
+                          new_texp,
+                          new_ttype,
+                          new_notes,
+                          ndate_str,
+                          nstart_str,
+                          nend_str,
+                          nbuf_start_str,
+                          nbuf_end_str,
+                          edit_id,
+                          current_user,
+                      ),
+                  )
+                  conn.commit()
+                  conn.close()
+                  st.success(
+                      f"✅ Appointment ID {edit_id} successfully updated!"
+                  )
+                  st.rerun()
+        else:
+          st.warning(
+              f"No appointment found with ID {edit_id} under your account."
+          )
 
   # --- TAB 2: BUDGET & PROFIT DASHBOARD ---
   with tab2:
@@ -643,7 +838,6 @@ else:
       budget_df["parking_expense"] = budget_df["parking_expense"].fillna(0)
       budget_df["travel_expense"] = budget_df["travel_expense"].fillna(0)
 
-      # Sum total expenses (general + parking + travel)
       budget_df["combined_expenses"] = (
           budget_df["expenses"]
           + budget_df["parking_expense"]
