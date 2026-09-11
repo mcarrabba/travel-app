@@ -53,7 +53,7 @@ def init_db():
         )
     """)
 
-  # Create Appointments Table with username mapping
+  # Create Appointments Table with travel expense & type fields
   cursor.execute("""
         CREATE TABLE IF NOT EXISTS appointments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,8 +61,14 @@ def init_db():
             title TEXT NOT NULL,
             city TEXT NOT NULL,
             phone_number TEXT,
+            hotel_name TEXT,
+            hotel_location TEXT,
             price REAL,
             expenses REAL,
+            parking_expense REAL,
+            travel_expense REAL,
+            travel_type TEXT,
+            notes TEXT,
             date TEXT NOT NULL,
             start_time TEXT NOT NULL,
             end_time TEXT NOT NULL,
@@ -80,10 +86,22 @@ def init_db():
     )
   if "phone_number" not in columns:
     cursor.execute("ALTER TABLE appointments ADD COLUMN phone_number TEXT")
+  if "hotel_name" not in columns:
+    cursor.execute("ALTER TABLE appointments ADD COLUMN hotel_name TEXT")
+  if "hotel_location" not in columns:
+    cursor.execute("ALTER TABLE appointments ADD COLUMN hotel_location TEXT")
   if "price" not in columns:
     cursor.execute("ALTER TABLE appointments ADD COLUMN price REAL")
   if "expenses" not in columns:
     cursor.execute("ALTER TABLE appointments ADD COLUMN expenses REAL")
+  if "parking_expense" not in columns:
+    cursor.execute("ALTER TABLE appointments ADD COLUMN parking_expense REAL")
+  if "travel_expense" not in columns:
+    cursor.execute("ALTER TABLE appointments ADD COLUMN travel_expense REAL")
+  if "travel_type" not in columns:
+    cursor.execute("ALTER TABLE appointments ADD COLUMN travel_type TEXT")
+  if "notes" not in columns:
+    cursor.execute("ALTER TABLE appointments ADD COLUMN notes TEXT")
 
   conn.commit()
   conn.close()
@@ -237,8 +255,9 @@ def generate_ics_file(username):
   conn = sqlite3.connect(DB_NAME)
   cursor = conn.cursor()
   cursor.execute(
-      "SELECT title, city, phone_number, price, expenses, date, start_time,"
-      " end_time FROM appointments WHERE username = ?",
+      "SELECT title, city, phone_number, hotel_name, hotel_location, price,"
+      " expenses, parking_expense, travel_expense, travel_type, notes, date,"
+      " start_time, end_time FROM appointments WHERE username = ?",
       (username,),
   )
   rows = cursor.fetchall()
@@ -251,7 +270,22 @@ def generate_ics_file(username):
   ]
 
   for row in rows:
-    title, city, phone, price, expenses, date_str, start_str, end_str = row
+    (
+        title,
+        city,
+        phone,
+        hotel_name,
+        hotel_loc,
+        price,
+        expenses,
+        parking,
+        travel_exp,
+        travel_type,
+        notes,
+        date_str,
+        start_str,
+        end_str,
+    ) = row
     dt_start = (
         date_str.replace("-", "") + "T" + start_str.replace(":", "") + "00"
     )
@@ -260,11 +294,24 @@ def generate_ics_file(username):
     desc = f"City: {city}"
     if phone:
       desc += f"\\nPhone: {phone}"
+    if hotel_name:
+      desc += f"\\nHotel: {hotel_name} ({hotel_loc or 'No location'})"
     if price:
       desc += f"\\nRevenue: ${price}"
-    if expenses:
-      desc += f"\\nExpenses: ${expenses}"
-      desc += f"\\nProfit: ${price - (expenses or 0)}"
+
+    total_exp = (
+        (expenses or 0.0) + (parking or 0.0) + (travel_exp or 0.0)
+    )
+    if total_exp > 0:
+      desc += f"\\nTotal Expenses: ${total_exp}"
+      if travel_exp and travel_exp > 0:
+        desc += f"\\nTransit ({travel_type}): ${travel_exp}"
+      if parking and parking > 0:
+        desc += f"\\nParking: ${parking}"
+      desc += f"\\nProfit: ${price - total_exp}"
+
+    if notes:
+      desc += f"\\nNotes: {notes}"
 
     ics_content.extend([
         "BEGIN:VEVENT",
@@ -331,7 +378,8 @@ with st.sidebar:
 
     conn = sqlite3.connect(DB_NAME)
     sidebar_df = pd.read_sql_query(
-        "SELECT price, expenses FROM appointments WHERE username = ?",
+        "SELECT price, expenses, parking_expense, travel_expense FROM"
+        " appointments WHERE username = ?",
         conn,
         params=(st.session_state.username,),
     )
@@ -341,7 +389,14 @@ with st.sidebar:
     if total_appts_count > 0:
       sidebar_df["price"] = sidebar_df["price"].fillna(0)
       sidebar_df["expenses"] = sidebar_df["expenses"].fillna(0)
-      sidebar_net = (sidebar_df["price"] - sidebar_df["expenses"]).sum()
+      sidebar_df["parking_expense"] = sidebar_df["parking_expense"].fillna(0)
+      sidebar_df["travel_expense"] = sidebar_df["travel_expense"].fillna(0)
+      total_costs = (
+          sidebar_df["expenses"]
+          + sidebar_df["parking_expense"]
+          + sidebar_df["travel_expense"]
+      ).sum()
+      sidebar_net = sidebar_df["price"].sum() - total_costs
     else:
       sidebar_net = 0.0
 
@@ -371,8 +426,8 @@ else:
 
   st.write(
       f"Welcome back, **{current_user}**! Streamline your travel with"
-      " automated **30-minute buffer blackouts**, profit tracking, and"
-      " mapping."
+      " automated **30-minute buffer blackouts**, transit expense tracking,"
+      " and profit calculations."
   )
 
   tab1, tab2, tab3, tab4 = st.tabs([
@@ -384,110 +439,162 @@ else:
 
   # --- TAB 1: SCHEDULE MANAGEMENT ---
   with tab1:
-    col1, col2 = st.columns([1, 1.5])
+    top_col1, top_col2 = st.columns([3, 1])
+    with top_col1:
+      st.subheader("Your Travel Itinerary")
+    with top_col2:
+      if "show_form" not in st.session_state:
+        st.session_state.show_form = True
 
-    with col1:
-      st.subheader("Add New Appointment")
-      with st.form("appointment_form"):
-        title = st.text_input("Appointment Title", "Client Meeting")
-        city = st.text_input("City", "New York")
-        phone_number = st.text_input("Phone Number", "555-0199")
-        price = st.number_input(
-            "Price / Revenue ($)", min_value=0.0, value=0.0, step=10.0
-        )
-        expenses = st.number_input(
-            "Expenses / Costs ($)", min_value=0.0, value=0.0, step=10.0
-        )
-        appt_date = st.date_input("Date")
+      if st.button("➕ New Appointment", use_container_width=True):
+        st.session_state.show_form = not st.session_state.show_form
 
-        c_time1, c_time2 = st.columns(2)
-        with c_time1:
-          start_time_input = st.time_input(
-              "Start Time", value=datetime.strptime("10:00", "%H:%M").time()
-          )
-        with c_time2:
-          end_time_input = st.time_input(
-              "End Time", value=datetime.strptime("11:30", "%H:%M").time()
-          )
+    if st.session_state.show_form:
+      with st.expander("📝 Create New Appointment Form", expanded=True):
+        with st.form("appointment_form"):
+          f_col1, f_col2 = st.columns(2)
+          with f_col1:
+            title = st.text_input("Appointment Title", "Client Meeting")
+            city = st.text_input("City", "New York")
+            phone_number = st.text_input("Phone Number", "555-0199")
+            hotel_name = st.text_input("Hotel Name", "The Plaza Hotel")
+            hotel_location = st.text_input(
+                "Hotel Address / Location", "768 5th Ave, New York, NY"
+            )
+          with f_col2:
+            price = st.number_input(
+                "Price / Revenue ($)", min_value=0.0, value=0.0, step=10.0
+            )
+            expenses = st.number_input(
+                "General Expenses ($)", min_value=0.0, value=0.0, step=10.0
+            )
+            parking_expense = st.number_input(
+                "Parking Expense ($)", min_value=0.0, value=0.0, step=5.0
+            )
+            travel_type = st.selectbox(
+                "Travel / Transit Type", ["Car", "Train", "Flight"]
+            )
+            travel_expense = st.number_input(
+                "Travel Expense Cost ($)", min_value=0.0, value=0.0, step=10.0
+            )
+            appt_date = st.date_input("Date")
 
-        submitted = st.form_submit_button("Add Appointment & Apply Buffers")
-
-        if submitted:
-          date_str = appt_date.strftime("%Y-%m-%d")
-          start_str = start_time_input.strftime("%H:%M")
-          end_str = end_time_input.strftime("%H:%M")
-
-          start_dt = datetime.strptime(
-              f"{date_str} {start_str}", "%Y-%m-%d %H:%M"
-          )
-          end_dt = datetime.strptime(f"{date_str} {end_str}", "%Y-%m-%d %H:%M")
-
-          if start_dt >= end_dt:
-            st.error("Error: End time must be later than start time.")
-          else:
-            buf_start_dt = start_dt - timedelta(minutes=30)
-            buf_end_dt = end_dt + timedelta(minutes=30)
-
-            buf_start_str = buf_start_dt.strftime("%H:%M")
-            buf_end_str = buf_end_dt.strftime("%H:%M")
-
-            has_overlap, conflicting_title = check_buffer_overlap(
-                current_user, date_str, buf_start_str, buf_end_str
+          c_time1, c_time2 = st.columns(2)
+          with c_time1:
+            start_time_input = st.time_input(
+                "Start Time", value=datetime.strptime("10:00", "%H:%M").time()
+            )
+          with c_time2:
+            end_time_input = st.time_input(
+                "End Time", value=datetime.strptime("11:30", "%H:%M").time()
             )
 
-            if has_overlap:
-              st.error(
-                  f"❌ Conflict! This overlaps with the 30-minute buffer of"
-                  f" '{conflicting_title}'."
-              )
+          notes = st.text_area(
+              "Notes / Remarks",
+              placeholder=(
+                  "Add confirmation codes, meeting agenda, or details here..."
+              ),
+          )
+
+          submitted = st.form_submit_button("Save Appointment & Apply Buffers")
+
+          if submitted:
+            date_str = appt_date.strftime("%Y-%m-%d")
+            start_str = start_time_input.strftime("%H:%M")
+            end_str = end_time_input.strftime("%H:%M")
+
+            start_dt = datetime.strptime(
+                f"{date_str} {start_str}", "%Y-%m-%d %H:%M"
+            )
+            end_dt = datetime.strptime(f"{date_str} {end_str}", "%Y-%m-%d %H:%M")
+
+            if start_dt >= end_dt:
+              st.error("Error: End time must be later than start time.")
             else:
-              conn = sqlite3.connect(DB_NAME)
-              cursor = conn.cursor()
-              cursor.execute(
-                  """
-                                    INSERT INTO appointments (username, title, city, phone_number, price, expenses, date, start_time, end_time, buffer_start, buffer_end)
-                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                                """,
-                  (
-                      current_user,
-                      title,
-                      city,
-                      phone_number,
-                      price,
-                      expenses,
-                      date_str,
-                      start_str,
-                      end_str,
-                      buf_start_str,
-                      buf_end_str,
-                  ),
-              )
-              conn.commit()
-              conn.close()
-              st.success(
-                  f"✅ Appointment saved! Blocked out buffer from"
-                  f" {buf_start_str} to {buf_end_str}."
-              )
-              st.rerun()
+              buf_start_dt = start_dt - timedelta(minutes=30)
+              buf_end_dt = end_dt + timedelta(minutes=30)
 
-    with col2:
-      st.subheader("Current Itinerary & Buffered Blocks")
-      conn = sqlite3.connect(DB_NAME)
-      df = pd.read_sql_query(
-          "SELECT id, title, city, phone_number, price, expenses, date,"
-          " start_time, end_time, buffer_start, buffer_end FROM appointments"
-          " WHERE username = ? ORDER BY date, start_time",
-          conn,
-          params=(current_user,),
+              buf_start_str = buf_start_dt.strftime("%H:%M")
+              buf_end_str = buf_end_dt.strftime("%H:%M")
+
+              has_overlap, conflicting_title = check_buffer_overlap(
+                  current_user, date_str, buf_start_str, buf_end_str
+              )
+
+              if has_overlap:
+                st.error(
+                    f"❌ Conflict! This overlaps with the 30-minute buffer of"
+                    f" '{conflicting_title}'."
+                )
+              else:
+                conn = sqlite3.connect(DB_NAME)
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                                        INSERT INTO appointments (username, title, city, phone_number, hotel_name, hotel_location, price, expenses, parking_expense, travel_expense, travel_type, notes, date, start_time, end_time, buffer_start, buffer_end)
+                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                    """,
+                    (
+                        current_user,
+                        title,
+                        city,
+                        phone_number,
+                        hotel_name,
+                        hotel_location,
+                        price,
+                        expenses,
+                        parking_expense,
+                        travel_expense,
+                        travel_type,
+                        notes,
+                        date_str,
+                        start_str,
+                        end_str,
+                        buf_start_str,
+                        buf_end_str,
+                    ),
+                )
+                conn.commit()
+                conn.close()
+                st.success(
+                    f"✅ Appointment saved! Blocked out buffer from"
+                    f" {buf_start_str} to {buf_end_str}."
+                )
+                st.session_state.show_form = False
+                st.rerun()
+
+    st.divider()
+
+    # Display Itinerary Table
+    conn = sqlite3.connect(DB_NAME)
+    df = pd.read_sql_query(
+        "SELECT id, title, city, hotel_name, hotel_location, phone_number,"
+        " price, expenses, parking_expense, travel_type, travel_expense, notes,"
+        " date, start_time, end_time, buffer_start, buffer_end FROM"
+        " appointments WHERE username = ? ORDER BY date, start_time",
+        conn,
+        params=(current_user,),
+    )
+    conn.close()
+
+    if df.empty:
+      st.info(
+          "No appointments added yet. Click **'➕ New Appointment'** above to"
+          " get started!"
       )
-      conn.close()
+    else:
+      # Combine all expenses for total cost calculation
+      df["total_expenses"] = (
+          df["expenses"].fillna(0)
+          + df["parking_expense"].fillna(0)
+          + df["travel_expense"].fillna(0)
+      )
+      df["profit"] = df["price"].fillna(0) - df["total_expenses"]
 
-      if df.empty:
-        st.info("No appointments added yet. Fill out the form to get started!")
-      else:
-        df["profit"] = df["price"].fillna(0) - df["expenses"].fillna(0)
-        st.dataframe(df, use_container_width=True)
+      st.dataframe(df, use_container_width=True)
 
+      col_act1, col_act2 = st.columns([1, 1])
+      with col_act1:
         ics_data = generate_ics_file(current_user)
         st.download_button(
             label="📥 Export Calendar (.ics)",
@@ -496,7 +603,8 @@ else:
             mime="text/calendar",
         )
 
-        st.write("### Manage Records")
+      with col_act2:
+        st.markdown("### Manage Records")
         delete_id = st.number_input(
             "Enter Appointment ID to Delete", min_value=0, step=1
         )
@@ -517,7 +625,8 @@ else:
     st.subheader("📊 Financial, Budget & Profit Dashboard")
     conn = sqlite3.connect(DB_NAME)
     budget_df = pd.read_sql_query(
-        "SELECT city, price, expenses FROM appointments WHERE username = ?",
+        "SELECT city, price, expenses, parking_expense, travel_type,"
+        " travel_expense FROM appointments WHERE username = ?",
         conn,
         params=(current_user,),
     )
@@ -531,18 +640,38 @@ else:
     else:
       budget_df["price"] = budget_df["price"].fillna(0)
       budget_df["expenses"] = budget_df["expenses"].fillna(0)
-      budget_df["profit"] = budget_df["price"] - budget_df["expenses"]
+      budget_df["parking_expense"] = budget_df["parking_expense"].fillna(0)
+      budget_df["travel_expense"] = budget_df["travel_expense"].fillna(0)
+
+      # Sum total expenses (general + parking + travel)
+      budget_df["combined_expenses"] = (
+          budget_df["expenses"]
+          + budget_df["parking_expense"]
+          + budget_df["travel_expense"]
+      )
+      budget_df["profit"] = budget_df["price"] - budget_df["combined_expenses"]
 
       total_revenue = budget_df["price"].sum()
-      total_expenses = budget_df["expenses"].sum()
+      total_general_exp = budget_df["expenses"].sum()
+      total_parking_exp = budget_df["parking_expense"].sum()
+      total_travel_exp = budget_df["travel_expense"].sum()
+      total_expenses = (
+          total_general_exp + total_parking_exp + total_travel_exp
+      )
       total_profit = budget_df["profit"].sum()
 
-      col_b1, col_b2, col_b3 = st.columns(3)
+      col_b1, col_b2, col_b3, col_b4, col_b5 = st.columns(5)
       with col_b1:
         st.metric(label="Total Revenue ($)", value=f"${total_revenue:,.2f}")
       with col_b2:
-        st.metric(label="Total Expenses ($)", value=f"${total_expenses:,.2f}")
+        st.metric(
+            label="General Expenses ($)", value=f"${total_general_exp:,.2f}"
+        )
       with col_b3:
+        st.metric(label="Parking ($)", value=f"${total_parking_exp:,.2f}")
+      with col_b4:
+        st.metric(label="Transit ($)", value=f"${total_travel_exp:,.2f}")
+      with col_b5:
         st.metric(
             label="Net Profit ($)",
             value=f"${total_profit:,.2f}",
@@ -555,13 +684,25 @@ else:
 
       st.write("### Financial Breakdown by City")
       city_summary = (
-          budget_df.groupby("city")[["price", "expenses", "profit"]]
+          budget_df.groupby("city")[
+              [
+                  "price",
+                  "expenses",
+                  "parking_expense",
+                  "travel_expense",
+                  "combined_expenses",
+                  "profit",
+              ]
+          ]
           .sum()
           .reset_index()
       )
       city_summary.columns = [
           "City",
           "Total Revenue ($)",
+          "General Expenses ($)",
+          "Parking Expenses ($)",
+          "Travel Expenses ($)",
           "Total Expenses ($)",
           "Net Profit ($)",
       ]
@@ -683,6 +824,6 @@ else:
             )
         else:
           st.info(
-              f"Note on weather: {w_status} (Try picking a date within the"
-              " next 7 days for live forecast data)."
+              f"Note on weather: {w_status} (Try picking a date within the next"
+              " 7 days for live forecast data)."
           )
