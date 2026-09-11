@@ -45,7 +45,6 @@ def init_db():
   conn = sqlite3.connect(DB_NAME)
   cursor = conn.cursor()
 
-  # Create Users Table
   cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             username TEXT PRIMARY KEY,
@@ -53,7 +52,6 @@ def init_db():
         )
     """)
 
-  # Create Appointments Table
   cursor.execute("""
         CREATE TABLE IF NOT EXISTS appointments (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -77,7 +75,6 @@ def init_db():
         )
     """)
 
-  # Safe schema migrations if DB already existed
   cursor.execute("PRAGMA table_info(appointments)")
   columns = [info[1] for info in cursor.fetchall()]
   if "username" not in columns:
@@ -108,6 +105,35 @@ def init_db():
 
 
 init_db()
+
+
+# --- HELPER: CONVERT 12H DROPDOWNS TO 24H STRING ("HH:MM") ---
+def convert_to_24h(hour, minute, am_pm):
+  h = int(hour)
+  if am_pm == "PM" and h < 12:
+    h += 12
+  elif am_pm == "AM" and h == 12:
+    h = 0
+  return f"{h:02d}:{minute}"
+
+
+# --- HELPER: PARSE 24H STRING TO (HOUR, MINUTE, AM_PM) FOR EDITING ---
+def parse_from_24h(time_str):
+  try:
+    dt = datetime.strptime(time_str, "%H:%M")
+    h = dt.hour
+    m = f"{dt.minute:02d}"
+    am_pm = "AM"
+    if h >= 12:
+      am_pm = "PM"
+      if h > 12:
+        h -= 12
+    if h == 0:
+      h = 12
+    return str(h), m, am_pm
+  except Exception:
+    return "10", "00", "AM"
+
 
 # --- 3. LIVE GOOGLE HOTELS API (SerpApi Integration) ---
 
@@ -437,8 +463,8 @@ else:
 
   st.write(
       f"Welcome back, **{current_user}**! Streamline your travel with"
-      " automated **30-minute buffer blackouts**, edit controls, and profit"
-      " calculations."
+      " automated **30-minute buffer blackouts**, AM/PM time pickers, and"
+      " profit tracking."
   )
 
   tab1, tab2, tab3, tab4 = st.tabs([
@@ -490,15 +516,44 @@ else:
             )
             appt_date = st.date_input("Date")
 
-          c_time1, c_time2 = st.columns(2)
-          with c_time1:
-            start_time_input = st.time_input(
-                "Start Time", value=datetime.strptime("10:00", "%H:%M").time()
-            )
-          with c_time2:
-            end_time_input = st.time_input(
-                "End Time", value=datetime.strptime("11:30", "%H:%M").time()
-            )
+          st.write("---")
+          st.write("🕒 **Appointment Time (AM/PM)**")
+          hours_list = [str(i) for i in range(1, 13)]
+          minutes_list = ["00", "15", "30", "45"]
+          ampm_list = ["AM", "PM"]
+
+          t_col1, t_col2 = st.columns(2)
+          with t_col1:
+            st.write("**Start Time**")
+            st_h, st_m, st_ap = st.columns(3)
+            with st_h:
+              start_h = st.selectbox(
+                  "Start Hour", hours_list, index=9, key="sh_new"
+              )
+            with st_m:
+              start_m = st.selectbox(
+                  "Start Min", minutes_list, index=0, key="sm_new"
+              )
+            with st_ap:
+              start_ap = st.selectbox(
+                  "Start AM/PM", ampm_list, index=0, key="sap_new"
+              )
+
+          with t_col2:
+            st.write("**End Time**")
+            et_h, et_m, et_ap = st.columns(3)
+            with et_h:
+              end_h = st.selectbox(
+                  "End Hour", hours_list, index=10, key="eh_new"
+              )
+            with et_m:
+              end_m = st.selectbox(
+                  "End Min", minutes_list, index=2, key="em_new"
+              )
+            with et_ap:
+              end_ap = st.selectbox(
+                  "End AM/PM", ampm_list, index=0, key="eap_new"
+              )
 
           notes = st.text_area(
               "Notes / Remarks",
@@ -511,8 +566,8 @@ else:
 
           if submitted:
             date_str = appt_date.strftime("%Y-%m-%d")
-            start_str = start_time_input.strftime("%H:%M")
-            end_str = end_time_input.strftime("%H:%M")
+            start_str = convert_to_24h(start_h, start_m, start_ap)
+            end_str = convert_to_24h(end_h, end_m, end_ap)
 
             start_dt = datetime.strptime(
                 f"{date_str} {start_str}", "%Y-%m-%d %H:%M"
@@ -520,7 +575,10 @@ else:
             end_dt = datetime.strptime(f"{date_str} {end_str}", "%Y-%m-%d %H:%M")
 
             if start_dt >= end_dt:
-              st.error("Error: End time must be later than start time.")
+              st.error(
+                  "Error: End time must be later than start time (make sure"
+                  " AM/PM is set correctly)."
+              )
             else:
               buf_start_dt = start_dt - timedelta(minutes=30)
               buf_end_dt = end_dt + timedelta(minutes=30)
@@ -670,6 +728,10 @@ else:
               r_end,
           ) = record
 
+          # Parse existing 24h strings to 12h dropdown defaults
+          def_sh, def_sm, def_sap = parse_from_24h(r_start)
+          def_eh, def_em, def_eap = parse_from_24h(r_end)
+
           with st.form("edit_appointment_form"):
             st.write(f"Editing Appointment ID: **{edit_id}**")
             e_col1, e_col2 = st.columns(2)
@@ -724,15 +786,70 @@ else:
               parsed_date = datetime.strptime(r_date, "%Y-%m-%d").date()
               new_date = st.date_input("Date", value=parsed_date)
 
-            e_time1, e_time2 = st.columns(2)
-            with e_time1:
-              parsed_start = datetime.strptime(r_start, "%H:%M").time()
-              new_start_time = st.time_input(
-                  "Start Time", value=parsed_start
-              )
-            with e_time2:
-              parsed_end = datetime.strptime(r_end, "%H:%M").time()
-              new_end_time = st.time_input("End Time", value=parsed_end)
+            st.write("---")
+            st.write("🕒 **Appointment Time (AM/PM)**")
+            hours_list = [str(i) for i in range(1, 13)]
+            minutes_list = ["00", "15", "30", "45"]
+            ampm_list = ["AM", "PM"]
+
+            et_col1, et_col2 = st.columns(2)
+            with et_col1:
+              st.write("**Start Time**")
+              esh, esm, esap = st.columns(3)
+              with esh:
+                sh_idx = (
+                    hours_list.index(def_sh)
+                    if def_sh in hours_list
+                    else 0
+                )
+                new_start_h = st.selectbox(
+                    "Start Hour", hours_list, index=sh_idx, key="sh_edit"
+                )
+              with esm:
+                sm_idx = (
+                    minutes_list.index(def_sm)
+                    if def_sm in minutes_list
+                    else 0
+                )
+                new_start_m = st.selectbox(
+                    "Start Min", minutes_list, index=sm_idx, key="sm_edit"
+                )
+              with esap:
+                sap_idx = (
+                    ampm_list.index(def_sap) if def_sap in ampm_list else 0
+                )
+                new_start_ap = st.selectbox(
+                    "Start AM/PM", ampm_list, index=sap_idx, key="sap_edit"
+                )
+
+            with et_col2:
+              st.write("**End Time**")
+              eeh, eem, eeap = st.columns(3)
+              with eeh:
+                eh_idx = (
+                    hours_list.index(def_eh)
+                    if def_eh in hours_list
+                    else 0
+                )
+                new_end_h = st.selectbox(
+                    "End Hour", hours_list, index=eh_idx, key="eh_edit"
+                )
+              with eem:
+                em_idx = (
+                    minutes_list.index(def_em)
+                    if def_em in minutes_list
+                    else 0
+                )
+                new_end_m = st.selectbox(
+                    "End Min", minutes_list, index=em_idx, key="em_edit"
+                )
+              with eeap:
+                eap_idx = (
+                    ampm_list.index(def_eap) if def_eap in ampm_list else 0
+                )
+                new_end_ap = st.selectbox(
+                    "End AM/PM", ampm_list, index=eap_idx, key="eap_edit"
+                )
 
             new_notes = st.text_area(
                 "Notes / Remarks", value=r_notes if r_notes else ""
@@ -742,8 +859,8 @@ else:
 
             if update_submitted:
               ndate_str = new_date.strftime("%Y-%m-%d")
-              nstart_str = new_start_time.strftime("%H:%M")
-              nend_str = new_end_time.strftime("%H:%M")
+              nstart_str = convert_to_24h(new_start_h, new_start_m, new_start_ap)
+              nend_str = convert_to_24h(new_end_h, new_end_m, new_end_ap)
 
               nstart_dt = datetime.strptime(
                   f"{ndate_str} {nstart_str}", "%Y-%m-%d %H:%M"
@@ -753,7 +870,10 @@ else:
               )
 
               if nstart_dt >= nend_dt:
-                st.error("Error: End time must be later than start time.")
+                st.error(
+                    "Error: End time must be later than start time (check AM/PM"
+                    " settings)."
+                )
               else:
                 nbuf_start_dt = nstart_dt - timedelta(minutes=30)
                 nbuf_end_dt = nend_dt + timedelta(minutes=30)
